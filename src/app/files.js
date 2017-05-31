@@ -16,13 +16,17 @@ function Files (storage) {
     return this.isReadOnly(path) || storage.exists(path)
   }
 
-  this.get = function (path) {
+  this.get = function (path, cb) {
     // NOTE: ignore the config file
     if (path === '.remix.config') {
       return null
     }
 
-    return readonly[path] || storage.get(path)
+    var content = readonly[path] || storage.get(path)
+    if (cb) {
+      cb(null, content)
+    }
+    return content
   }
 
   this.set = function (path, content) {

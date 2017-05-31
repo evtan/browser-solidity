@@ -9,66 +9,68 @@ module.exports = filepanel
 
 var css = csjs`
   .container {
-    display           : flex;
-    flex-direction    : row;
-    width             : 100%;
-    box-sizing        : border-box;
+    display           : flex
+    flex-direction    : row
+    width             : 100%
+    box-sizing        : border-box
   }
   .fileexplorer       {
-    display           : flex;
-    flex-direction    : column;
-    position          : relative;
-    top               : -33px;
-    width             : 100%;
+    display           : flex
+    flex-direction    : column
+    position          : relative
+    top               : -33px
+    width             : 100%
   }
   .menu               {
-    display           : flex;
-    flex-direction    : row;
+    display           : flex
+    flex-direction    : row
   }
   .newFile            {
-    padding           : 10px;
+    padding           : 10px
+  }
+  .connectToLocalhost {
+    padding           : 10px
   }
   .uploadFile         {
-    padding           : 10px;
+    padding           : 10px
   }
   .toggleLHP          {
-    display           : flex;
-    justify-content   : flex-end;
-    padding           : 10px;
-    width             : 100%;
-    font-weight       : bold;
-    cursor            : pointer;
-    color             : black;
+    display           : flex
+    justify-content   : flex-end
+    padding           : 10px
+    width             : 100%
+    font-weight       : bold
+    cursor            : pointer
+    color             : black
   }
   .isVisible          {
-    position          : absolute;
-    left              : 35px;
+    position          : absolute
+    left              : 35px
   }
   .isHidden {
-    position          : absolute;
+    position          : absolute
     height            : 99%
-    left              : -101%;
+    left              : -101%
   }
   .treeview {
-    height            : 100%;
-    background-color  : white;
+    background-color  : white
   }
   .dragbar            {
-    position          : relative;
-    top               : 4px;
-    cursor            : col-resize;
-    z-index           : 999;
-    border-right      : 2px solid hsla(215, 81%, 79%, .3);
+    position          : relative
+    top               : 4px
+    cursor            : col-resize
+    z-index           : 999
+    border-right      : 2px solid hsla(215, 81%, 79%, .3)
   }
   .ghostbar           {
-    width             : 3px;
-    background-color  : #C6CFF7;
-    opacity           : 0.5;
-    position          : absolute;
-    cursor            : col-resize;
-    z-index           : 9999;
-    top               : 0;
-    bottom            : 0;
+    width             : 3px
+    background-color  : #C6CFF7
+    opacity           : 0.5
+    position          : absolute
+    cursor            : col-resize
+    z-index           : 9999
+    top               : 0
+    bottom            : 0
   }
 `
 
@@ -76,9 +78,10 @@ var limit = 60
 var canUpload = window.File || window.FileReader || window.FileList || window.Blob
 var ghostbar = yo`<div class=${css.ghostbar}></div>`
 
-function filepanel (appAPI, files) {
+function filepanel (appAPI, files, systemFiles) {
   var fileExplorer = new FileExplorer(appAPI, files)
   var dragbar = yo`<div onmousedown=${mousedown} class=${css.dragbar}></div>`
+  var fileSystemExplorer
 
   function template () {
     return yo`
@@ -87,6 +90,9 @@ function filepanel (appAPI, files) {
           <div class=${css.menu}>
             <span onclick=${createNewFile} class="newFile ${css.newFile}" title="New File">
               <i class="fa fa-plus-circle"></i>
+            </span>
+            <span onclick=${connectToLocalhost} class="${css.connectToLocalhost}" title="Connect to Localhost">
+              <i class="websocketconn fa fa-link"></i>
             </span>
             ${canUpload ? yo`
               <span class=${css.uploadFile} title="Open local file">
@@ -100,6 +106,7 @@ function filepanel (appAPI, files) {
             </span>
           </div>
           <div class=${css.treeview}>${fileExplorer}</div>
+          <div class="filesystemexplorer ${css.treeview}"></div>
         </div>
         ${dragbar}
       </div>
@@ -175,5 +182,44 @@ function filepanel (appAPI, files) {
     } else {
       appAPI.switchToFile(newName)
     }
+  }
+
+  function connectToLocalhost () {
+    if (fileSystemExplorer) {
+      fileSystemExplorer.remove()
+    } else {
+      // also register to the socket to get the connection state (one time register)
+      var websocketconn = document.querySelector('.websocketconn')
+      systemFiles.remixd.event.register('connecting', (event) => {
+        websocketconn.style.color = 'orange'
+        websocketconn.setAttribute('title', JSON.stringify(event))
+      })
+
+      systemFiles.remixd.event.register('connected', (event) => {
+        websocketconn.style.color = 'green'
+        websocketconn.setAttribute('title', JSON.stringify(event))
+      })
+
+      systemFiles.remixd.event.register('errored', (event) => {
+        websocketconn.style.color = 'red'
+        websocketconn.setAttribute('title', JSON.stringify(event))
+      })
+
+      systemFiles.remixd.event.register('closed', (event) => {
+        websocketconn.style.color = 'grey'
+        websocketconn.setAttribute('title', JSON.stringify(event))
+      })
+    }
+    systemFiles.init((error) => {
+      if (error) {
+        console.log(error)
+      } else {
+        fileSystemExplorer = new FileExplorer(appAPI, systemFiles)
+        fileSystemExplorer.events.register('focus', function (path) {
+          appAPI.switchToFile(path)
+        })
+        document.querySelector('.filesystemexplorer').appendChild(fileSystemExplorer)
+      }
+    })
   }
 }

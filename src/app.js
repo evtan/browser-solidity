@@ -14,8 +14,10 @@ var queryParams = new QueryParams()
 var GistHandler = require('./app/gist-handler')
 var gistHandler = new GistHandler()
 
+var Remixd = require('./lib/remixd')
 var Storage = require('./app/storage')
 var Files = require('./app/files')
+var Systemfiles = require('./app/system-files')
 var Config = require('./app/config')
 var Editor = require('./app/editor')
 var Renderer = require('./app/renderer')
@@ -70,18 +72,23 @@ var run = function () {
   var fileStorage = new Storage('sol:')
   var files = new Files(fileStorage)
   var config = new Config(fileStorage)
+  var remixd = new Remixd()
+  var systemFiles = new Systemfiles(remixd)
 
   var executionContext = new ExecutionContext()
   var compiler = new Compiler(handleImportCall)
   var offsetToLineColumnConverter = new OffsetToLineColumnConverter(compiler.event)
 
   // return all the files, except the temporary/readonly ones
-  function packageFiles () {
+  function packageFiles (cb) {
     var ret = {}
-    Object.keys(files.list())
-      .filter(function (path) { if (!files.isReadOnly(path)) { return path } })
-      .map(function (path) { ret[path] = { content: files.get(path) } })
-    return ret
+    var filtered = Object.keys(files.list()).filter(function (path) { if (!files.isReadOnly(path)) { return path } })
+    async.eachSeries(filtered, function (path, cb) {
+      ret[path] = { content: files.get(path) }
+      cb()
+    }, () => {
+      cb(ret)
+    })
   }
 
   function createNonClashingName (path) {
@@ -156,7 +163,13 @@ var run = function () {
           refreshTabs()
         } else {
           console.log('add to obj', obj, key)
-          obj[key] = files.get(key)
+          files.get(key, (error, content) => {
+            if (error) {
+              console.log(error)
+            } else {
+              obj[key] = content
+            }
+          })
         }
         done++
         if (done >= count) {
@@ -169,9 +182,15 @@ var run = function () {
 
     for (var y in files.list()) {
       console.log('checking', y)
-      obj[y] = files.get(y)
-      count++
-      check(y)
+      files.get(y, (error, content) => {
+        if (error) {
+          console.log(error)
+        } else {
+          obj[y] = content
+          count++
+          check(y)
+        }
+      })
     }
   }
 
@@ -187,8 +206,8 @@ var run = function () {
   // and file-panel.js adds its elements (including css), see "Editor" above
   var css = csjs`
     .filepanel-container    {
-      display     : flex;
-      width       : 200px;
+      display     : flex
+      width       : 200px
     }
   `
   var filepanelContainer = document.querySelector('#filepanel')
@@ -198,7 +217,7 @@ var run = function () {
     switchToFile: switchToFile,
     event: this.event
   }
-  var filePanel = new FilePanel(FilePanelAPI, files)
+  var filePanel = new FilePanel(FilePanelAPI, files, systemFiles)
   // TODO this should happen inside file-panel.js
   filepanelContainer.appendChild(filePanel)
 
@@ -245,23 +264,28 @@ var run = function () {
 
   $('#gist').click(function () {
     if (confirm('Are you sure you want to publish all your files anonymously as a public gist on github.com?')) {
-      var files = packageFiles()
-      var description = 'Created using browser-solidity: Realtime Ethereum Contract Compiler and Runtime. \n Load this file by pasting this gists URL or ID at https://ethereum.github.io/browser-solidity/#version=' + queryParams.get().version + '&optimize=' + queryParams.get().optimize + '&gist='
+      packageFiles((error, packaged) => {
+        if (error) {
+          console.log(error)
+        } else {
+          var description = 'Created using browser-solidity: Realtime Ethereum Contract Compiler and Runtime. \n Load this file by pasting this gists URL or ID at https://ethereum.github.io/browser-solidity/#version=' + queryParams.get().version + '&optimize=' + queryParams.get().optimize + '&gist='
 
-      $.ajax({
-        url: 'https://api.github.com/gists',
-        type: 'POST',
-        data: JSON.stringify({
-          description: description,
-          public: true,
-          files: files
-        })
-      }).done(function (response) {
-        if (response.html_url && confirm('Created a gist at ' + response.html_url + ' Would you like to open it in a new window?')) {
-          window.open(response.html_url, '_blank')
+          $.ajax({
+            url: 'https://api.github.com/gists',
+            type: 'POST',
+            data: JSON.stringify({
+              description: description,
+              public: true,
+              files: packaged
+            })
+          }).done(function (response) {
+            if (response.html_url && confirm('Created a gist at ' + response.html_url + ' Would you like to open it in a new window?')) {
+              window.open(response.html_url, '_blank')
+            }
+          }).fail(function (xhr, text, err) {
+            alert('Failed to create gist: ' + (err || 'Unknown transport error'))
+          })
         }
-      }).fail(function (xhr, text, err) {
-        alert('Failed to create gist: ' + (err || 'Unknown transport error'))
       })
     }
   })
@@ -274,12 +298,17 @@ var run = function () {
     if (target === null) {
       return
     }
-    var files = packageFiles()
-    $('<iframe/>', {
-      src: target,
-      style: 'display:none;',
-      load: function () { this.contentWindow.postMessage(['loadFiles', files], '*') }
-    }).appendTo('body')
+    packageFiles((error, packaged) => {
+      if (error) {
+        console.log(error)
+      } else {
+        $('<iframe/>', {
+          src: target,
+          style: 'display:none;',
+          load: function () { this.contentWindow.postMessage(['loadFiles', packaged], '*') }
+        }).appendTo('body')
+      }
+    })
   })
 
   // --------------------Files tabs-----------------------------
@@ -352,12 +381,22 @@ var run = function () {
 
     config.set('currentFile', file)
 
-    if (files.isReadOnly(file)) {
-      editor.openReadOnly(file, files.get(file))
-    } else {
-      editor.open(file, files.get(file))
-    }
-    self.event.trigger('currentFileChanged', [file])
+    var targetedExplorer
+    if (files.exists(file)) targetedExplorer = files
+    if (systemFiles.exists(file)) targetedExplorer = systemFiles
+    // TODO really bad ---^. needs to refactor the whole thing.
+    targetedExplorer.get(file, (error, content) => {
+      if (error) {
+        console.log(error)
+      } else {
+        if (targetedExplorer.isReadOnly(file)) {
+          editor.openReadOnly(file, content)
+        } else {
+          editor.open(file, content)
+        }
+        self.event.trigger('currentFileChanged', [file, targetedExplorer])
+      }
+    })
   }
 
   function switchToNextFile () {
@@ -368,8 +407,14 @@ var run = function () {
   }
 
   var previouslyOpenedFile = config.get('currentFile')
-  if (previouslyOpenedFile && files.get(previouslyOpenedFile)) {
-    switchToFile(previouslyOpenedFile)
+  if (previouslyOpenedFile) {
+    files.get(previouslyOpenedFile, (error, content) => {
+      if (!error && content) {
+        switchToFile(previouslyOpenedFile)
+      } else {
+        switchToNextFile()
+      }
+    })
   } else {
     switchToNextFile()
   }
@@ -568,7 +613,7 @@ var run = function () {
 
   function handleImportCall (url, cb) {
     if (files.exists(url)) {
-      cb(null, files.get(url))
+      files.get(url, cb)
       return
     }
 
@@ -695,7 +740,7 @@ var run = function () {
       return cb('No metadata')
     }
 
-    Object.keys(metadata.sources).forEach(function (fileName) {
+    async.eachSeries(Object.keys(metadata.sources), function (fileName, cb) {
       // find hash
       var hash
       try {
@@ -704,16 +749,23 @@ var run = function () {
         return cb('Metadata inconsistency')
       }
 
-      sources.push({
-        content: files.get(fileName),
-        hash: hash
+      files.get(fileName, (error, content) => {
+        if (error) {
+          console.log(error)
+        } else {
+          sources.push({
+            content: content,
+            hash: hash
+          })
+        }
+        cb()
       })
+    }, function () {
+      // publish the list of sources in order, fail if any failed
+      async.eachSeries(sources, function (item, cb) {
+        swarmVerifiedPublish(item.content, item.hash, cb)
+      }, cb)
     })
-
-    // publish the list of sources in order, fail if any failed
-    async.eachSeries(sources, function (item, cb) {
-      swarmVerifiedPublish(item.content, item.hash, cb)
-    }, cb)
   }
 
   udapp.event.register('publishContract', this, function (contract) {
@@ -801,8 +853,8 @@ var run = function () {
 
   var cssCompilationWarning = csjs`
     .compilationWarning extends ${styles.warningTextBox} {
-      margin-top: 1em;
-      margin-left: 0.5em;
+      margin-top: 1em
+      margin-left: 0.5em
     }
   `
   var warnMsg = ' Last compilation took {X}ms. We suggest to turn off autocompilation.'
@@ -826,8 +878,14 @@ var run = function () {
     if (currentFile) {
       var target = currentFile
       var sources = {}
-      sources[target] = files.get(target)
-      compiler.compile(sources, target)
+      files.get(target, (error, content) => {
+        if (error) {
+          console.log(error)
+        } else {
+          sources[target] = content
+          compiler.compile(sources, target)
+        }
+      })
     }
   }
 
@@ -835,7 +893,11 @@ var run = function () {
     var currentFile = config.get('currentFile')
     if (currentFile && editor.current()) {
       var input = editor.get(currentFile)
-      files.set(currentFile, input)
+      var targetedExplorer
+      if (files.exists(currentFile)) targetedExplorer = files
+      if (systemFiles.exists(currentFile)) targetedExplorer = systemFiles
+      // TODO really bad ---^. needs to refactor the whole thing.
+      targetedExplorer.set(currentFile, input)
     }
   }
 

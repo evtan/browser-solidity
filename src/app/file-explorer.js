@@ -72,8 +72,10 @@ function fileExplorer (appAPI, files) {
     </span>
   `
 
-  appAPI.event.register('currentFileChanged', (newFile) => {
-    fileFocus(newFile)
+  appAPI.event.register('currentFileChanged', (newFile, explorer) => {
+    if (explorer === files) {
+      fileFocus(newFile)
+    }
   })
   fileEvents.register('fileRemoved', fileRemoved)
   fileEvents.register('fileRenamed', fileRenamed)
